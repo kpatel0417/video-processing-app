@@ -4,85 +4,75 @@ const fs = require('fs');    //file system
 const axios = require('axios');   // will use for http requests to download videos
 const fluentFFmpeg = require('fluent-ffmpeg');  // wrapper around FFmpeg for video processing
 const path = require('path');
+const multer = require('multer');
 require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.use('/videos', express.static(path.join(__dirname)));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Allows me to access videos from uploads folder in the browser
 
-app.get("/", (req, res) => {
-    res.send("Video Processing API is running...");
+// app.get("/", (req, res) => {
+//     res.send("Video Processing API is running...");
+// });
+
+// multer setup for the file handing 
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {     //All of the videos uploaded will be stored in the uploads folder
+        cb(null, './uploads/');       
+    },
+    filename: (req, file, cb) => {        // How the name of the file will be stored
+        cb(null, `${Date.now()}-${file.originalname}`);
+    }
 });
+const upload = multer({storage: storage});
+
 
 //This rounte will handle the video processing
-app.post('/process-video', async (req, res) => {
-    const { video1, video2 } = req.body;     // Here we extract video URLs for further processing
+
+app.post('/process-video', upload.fields([{ name: 'video1' }, { name: 'video2' }]), async (req, res) => {    // Two videos are being uploaded
+
+    const video1 = req.files.video1 ? req.files.video1[0].path : null;   //Acess the file paths
+    const video2 = req.files.video2 ? req.files.video2[0].path : null;
 
     if (!video1 || !video2) {
-        return res.status(400).json({ error: 'Both video URLs are required' });  //Need to make sure both URLs are given
-    }
+        return res.status(400).json({ error: 'Both video files are required' });
+      }
+try {
+    const outputPath = path.join(__dirname, 'uploads', 'output.mp4');    //define output path. For now will always be called 'output.mp4'
+    await processVideos(video1, video2, outputPath);   //Process the video
 
-    try {
-        //these are the locations I would like to store the videos
-        const video1Path = path.join(__dirname, 'video1.mp4');
-        const video2Path = path.join(__dirname, 'video2.mp4');
-
-        //fetches and saves the videos locally
-        await downloadVideo(video1, video1Path);
-        await downloadVideo(video2, video2Path);
-
-        const outputPath = path.join(__dirname, 'output.mp4'); //Here we define an output video path
-        await processVideos(video1Path, video2Path, outputPath); // Process the videos and merge
-
-        res.json({ status: 'success', processed_video_url: `/videos/output.mp4` }); //we return the URL of the processed video
-
-
-        setTimeout(() => {
-            deleteFile(video1Path);
-            deleteFile(video2Path);
-        }, 5000);
-
-    } catch (error) {
-    res.status(500).json({ error: error.message });  // basic error catching if anything above fails
+    res.json({ status: 'success', processedVideoUrl: `/uploads/output.mp4` }); //Receive output url upon success
+    setTimeout(() => {                                    // Deletes input files after 5 seconds (Not really necessary)
+        console.log('Deleting files:', video1, video2);
+        deleteFile(video1);
+        deleteFile(video2);
+    }, 5000);
+  } catch (error) {
+    console.error('Error during video processing:', error);
+    res.status(500).json({ error: 'Error processing video' });
   }
 
 });
 
 const deleteFile = (filePath) => {
     fs.unlink(filePath, (err) => {
-        if (err) console.error(`❌ Error deleting file: ${filePath}`, err);
-        else console.log(`✅ File deleted: ${filePath}`);
+        if (err) console.error(`Error deleting file: ${filePath}`, err);
+        else console.log(`File deleted: ${filePath}`);
     });
 };
-
-async function downloadVideo(url, outputPath) {
-    const writer = fs.createWriteStream(outputPath); //creating a stream to save the download
-    const response = await axios({  //request to the video URL
-      url,
-      method: 'GET',
-      responseType: 'stream',
-    });
-  
-    response.data.pipe(writer);  //response data into file
-    return new Promise((resolve, reject) => {   //returning a promise which resolves when the download is finished
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-    });
-  }
-
 
   const ffmpeg = require('fluent-ffmpeg');
 
   function processVideos(input1, input2, outputPath) {
     return new Promise((resolve, reject) => {
       ffmpeg()
-        .input(input1)
-        .input(input2)
+        .input(input1)    //first video
+        .input(input2)    // second video
         .complexFilter([
-          '[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[outv][outa]',
-          '[outv]scale=ceil(iw/2)*2:ceil(ih/2)*2[outv_scaled]'  // Updated scale filter
+          '[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[outv][outa]',  // concatenates the videos
+          '[outv]scale=ceil(iw/2)*2:ceil(ih/2)*2[outv_scaled]'  // Ensures the width and height are even, having issues without it
         ])
         .outputOptions([
           '-c:v libx264',
@@ -91,15 +81,15 @@ async function downloadVideo(url, outputPath) {
           '-c:a aac',
           '-strict experimental'
         ])
-        .map('[outv_scaled]')
+        .map('[outv_scaled]')   //mapping processed streams to output
         .map('[outa]')
-        .output(outputPath)
+        .output(outputPath)   // final output
         .on('end', () => {
-          console.log('✅ Video processing complete:', outputPath);
+          console.log('Video processing complete:', outputPath);
           resolve(outputPath);
         })
         .on('error', (err) => {
-          console.error('❌ FFmpeg error:', err.message);
+          console.error('FFmpeg error:', err.message);
           reject(err);
         })
         .run();
